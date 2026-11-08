@@ -122,6 +122,32 @@ export function botRoutes(cfg: Config, engine: Engine) {
     res.json({ dbStatus: bot.status, sandbox, process: proc });
   }));
 
+  // ---- change the Telegram token of an existing bot (works while running) ----
+  r.put("/:id/token", h(async (req, res) => {
+    const bot = await loadBotFor(req, res); if (!bot) return;
+    const token = str(req.body?.token, "Bot token", { max: 100 });
+    let info; try { info = await verifyBotToken(token); } catch (e: any) { throw new HttpError(422, e.message); }
+    const different = Number(bot.telegram_id) !== info.id;
+    if (different && req.body?.allowDifferent !== true)
+      throw new HttpError(409, `This token belongs to a different Telegram bot (@${info.username}). Confirm to switch this bot to it.`);
+    const dupe = await q("SELECT 1 FROM bots WHERE telegram_id=$1 AND id<>$2", [info.id, bot.id]);
+    if (dupe.rowCount) throw new HttpError(409, "This Telegram bot is already registered on the platform.");
+    await q("UPDATE bots SET token_enc=$2, telegram_id=$3, telegram_username=$4, updated_at=now() WHERE id=$1", [bot.id, encrypt(token, cfg.encryptionKey), info.id, info.username]);
+    await audit(req, "bot.token_change", { type: "bot", id: bot.id }, { username: info.username, differentBot: different });
+    let applied: "restarted" | "saved" | "saved_restart_failed" = "saved";
+    if (bot.status === "running" && bot.sandbox_id) {
+      try {
+        const fresh = (await q("SELECT * FROM bots WHERE id=$1", [bot.id])).rows[0];
+        await engine.restart(fresh);
+        applied = "restarted";
+      } catch (e: any) {
+        console.error("restart after token change failed", e?.message);
+        applied = "saved_restart_failed";
+      }
+    }
+    res.json({ ok: true, applied, telegramUsername: info.username });
+  }));
+
   // ---- environment variables (values never returned) ----
   r.get("/:id/env", h(async (req, res) => {
     const bot = await loadBotFor(req, res, false); if (!bot) return;

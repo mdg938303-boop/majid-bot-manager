@@ -70,7 +70,12 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
         </div>
         <div className="mt-2 truncate px-1 text-xs text-slate-500">{user.email} · {user.role}</div>
       </nav>
-      <main className="mx-auto w-full max-w-5xl flex-1 p-3 sm:p-6">{page}</main>
+      <main className="mx-auto w-full max-w-5xl flex-1 p-3 pb-24 sm:p-6 lg:pb-6">{page}</main>
+      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t border-slate-200 bg-white pb-[env(safe-area-inset-bottom)] dark:border-slate-800 dark:bg-slate-900 lg:hidden" aria-label="Quick navigation">
+        {[["dashboard", "🏠", "Home"], ["bots", "🤖", "My bots"], ["new", "➕", "Add bot"], ["console", "📟", "Console"]].map(([k, icon, label]) => (
+          <a key={k} href={`#/${k}`} className={`flex flex-col items-center py-2 text-[11px] ${seg === k || (!seg && k === "dashboard") ? "font-semibold text-brand-600" : "text-slate-500"}`}><span className="text-lg leading-none">{icon}</span>{label}</a>
+        ))}
+      </nav>
     </div>
   );
 }

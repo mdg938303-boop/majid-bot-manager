@@ -125,6 +125,7 @@ export class Engine {
     if (!(await this.requireSandbox(bot))) return { queued: true, deploymentId: await this.enqueue(bot, "redeploy", bot.owner_id) };
     if ((await processState(this.runtime, bot.sandbox_id)) === "running") { await q("UPDATE bots SET status='running', stopped_at=NULL WHERE id=$1", [bot.id]); return { queued: false, status: "running" }; }
     const m = bot.manifest as Manifest;
+    await this.pushEnv(bot); // apply the latest token / env variables before launching
     await startProcess(this.runtime, bot.sandbox_id, m, { log: (s, t) => this.log(bot.id, bot.current_deployment_id, s, t), stage: () => undefined, sandboxCreated: () => undefined });
     await q("UPDATE bots SET status='running', stopped_at=NULL, updated_at=now() WHERE id=$1", [bot.id]);
     return { queued: false, status: "running" };

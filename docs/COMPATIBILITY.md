@@ -15,6 +15,7 @@ Legend: ✅ implemented and covered by tests that were run · 🟡 implemented, 
 | React/Tailwind UI | 🟡 | not built here (no npm registry access) |
 | Start/Stop/Restart/Rebuild/Redeploy/Delete/Free | 🟡 | call real runtime; process state read via `kill -0` |
 | File manager (browse/edit/create/rename/delete/upload/download) | 🟡 | operates on Postgres rows; traversal blocked by `safeRelPath` (✅ unit-tested) |
+| Change bot token (also while running; restarts the bot) | 🟡 | verified with getMe; new token pushed to the sandbox before start |
 | Logs: stdout/stderr/build/system, filter, persistence, SSE | 🟡 | near-live (poll interval), not raw streaming |
 | Admin / sub-admin permissions, audit log, kill switch | 🟡 | enforced server-side |
 | Cost dashboard | ⚠ | **estimate only**; Render exposes no remaining-credit API I could verify |
