@@ -1,0 +1,30 @@
+{
+  "name": "majid-bot-manager",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build:backend": "tsc -p backend/tsconfig.json",
+    "build:frontend": "npm install --prefix frontend --include=dev && npm run build --prefix frontend",
+    "build": "npm run build:backend && npm run build:frontend",
+    "start": "node backend/dist/server.js",
+    "test": "tsc -p backend/tsconfig.test.json && node --test \".build-test/tests/*.test.js\"",
+    "test:api": "npm test"
+  },
+  "dependencies": {
+    "@renderinc/sdk": "^1.5.0",
+    "cookie-parser": "^1.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.8",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.6.3"
+  }
+}

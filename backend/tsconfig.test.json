@@ -1,0 +1,7 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "module": "NodeNext", "moduleResolution": "NodeNext", "strict": true, "skipLibCheck": true,
+    "outDir": "../.build-test", "rootDir": ".", "types": ["node"], "esModuleInterop": true
+  },
+  "include": ["src/lib/**/*.ts", "src/sandbox/runtime.ts", "src/services/deployer.ts", "tests/**/*.ts"]
+}

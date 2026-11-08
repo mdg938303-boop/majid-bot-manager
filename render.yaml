@@ -1,0 +1,38 @@
+# Majid Bot Manager V2 — Render Blueprint.
+# Field names verified against Render's Blueprint docs/examples (databases.plan, fromDatabase.connectionString, generateValue, sync:false).
+# Nothing here upgrades a plan automatically. Plans are explicit; change them yourself in the Dashboard.
+databases:
+  - name: mbm-db
+    plan: basic-256mb        # ~ $6/mo (paid; the free Postgres tier expires)
+    postgresMajorVersion: "16"
+
+services:
+  - type: web
+    name: majid-bot-manager
+    runtime: node
+    plan: starter            # ~ $7/mo
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: false        # you decide when to deploy; avoids surprise builds
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: mbm-db
+          property: connectionString
+      - key: ENCRYPTION_KEY
+        generateValue: true  # random secret generated once by Render; NEVER change it later or stored secrets become unreadable
+      - key: ADMIN_EMAIL
+        sync: false          # you type it in the Dashboard
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: RENDER_API_KEY
+        sync: false
+      - key: RENDER_WORKSPACE_ID
+        sync: false
+      - key: RENDER_SANDBOX_GROUP_ID
+        sync: false          # optional
