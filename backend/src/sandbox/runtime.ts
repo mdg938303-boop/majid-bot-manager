@@ -9,6 +9,7 @@ export interface Runtime {
   create(opts: CreateOptions): Promise<{ id: string }>;
   exec(id: string, command: string, onOutput?: (stream: "stdout" | "stderr", chunk: string) => void): Promise<ExecResult>;
   upload(id: string, path: string, data: Buffer, kind: "file" | "tar"): Promise<void>;
+  download(id: string, path: string, maxBytes: number): Promise<Buffer>; // raw bytes of a single file
   status(id: string): Promise<string>; // creating | running | suspending | suspended | resuming | errored | terminated | unknown
   terminate(id: string): Promise<void>;
   setGroupConcurrency?(groupId: string, limit: number): Promise<void>;

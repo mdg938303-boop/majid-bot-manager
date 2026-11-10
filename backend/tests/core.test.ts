@@ -8,7 +8,14 @@ import { buildZip, inspectAndExtractZip, ZipValidationError, DEFAULT_ZIP_LIMITS 
 import { detectProject, DetectionError, validateRequirements } from "../src/lib/detect.js";
 import { buildTar } from "../src/lib/tar.js";
 import { TOKEN_RE, verifyBotToken } from "../src/lib/telegram.js";
-import { buildEnvFile, buildNetworkPolicy, DeployError, processState, runDeployment, shq, startCommand, stopProcess, readLogChunk, type DeployHooks } from "../src/services/deployer.js";
+import { buildEnvFile, buildNetworkPolicy, DeployError, processState, runDeployment, shq, startCommand, stopProcess, readLogChunk, exportData, checkRuntimeTools, RESERVED_ENV, type DeployHooks } from "../src/services/deployer.js";
+import { BRIDGE_PY } from "../src/sandbox/bridge.js";
+import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:http";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { FakeRuntime } from "./fakeRuntime.js";
 
 const key = parseKey(randomBytes(32).toString("hex"));
@@ -229,4 +236,75 @@ test("readLogChunk advances offset by bytes", async () => {
   rt.exec = (async () => ({ exitCode: 0, stdout: "héllo\n", stderr: "" })) as any;
   const r = await readLogChunk(rt, id, "run.out.log", 10);
   assert.equal(r.newOffset, 10 + Buffer.byteLength("héllo\n"));
+});
+
+// ---------- persistent data, webhook bridge, runtime check ----------
+test("exportData: saves tar + gzip, reports none / too_large / tar failure, never throws", async () => {
+  const rt = new FakeRuntime(); const id = (await rt.create({ plan: "x", networkPolicy: { type: "deny-all" } })).id;
+  const ok = await exportData(rt, id);
+  assert.equal(ok.status, "saved");
+  if (ok.status === "saved") { assert.deepEqual(gunzipSync(ok.gz), rt.tarBytes); assert.equal(ok.sha.length, 64); assert.deepEqual(rt.downloads, ["data.tar"]); }
+  rt.hasDataDir = false; assert.equal((await exportData(rt, id)).status, "none");
+  rt.hasDataDir = true; rt.dataFiles = 0; assert.equal((await exportData(rt, id)).status, "none");
+  rt.dataFiles = 2; rt.dataKb = 20_000; const big = await exportData(rt, id); assert.equal(big.status, "too_large");
+  rt.dataKb = 5; rt.tarFails = true; assert.equal((await exportData(rt, id)).status, "error");
+  await rt.terminate(id); assert.equal((await exportData(rt, id)).status, "error");
+});
+test("deploy restores saved data as a tar into app/ and keeps platform env names reserved", async () => {
+  const rt = new FakeRuntime(); const { h } = hooks();
+  await runDeployment(rt, { ...pyInput(), dataArchive: Buffer.from("tar-of-data") }, h);
+  assert.deepEqual(rt.uploads.filter((u) => u.kind === "tar").map((u) => u.path), ["app", "app"]);
+  for (const k of ["PORT", "WEBHOOK_PATH", "DATA_DIR"]) assert.ok(RESERVED_ENV.has(k));
+});
+test("start command exposes DATA_DIR and, in webhook mode, runs the bridge with a validated port/path", () => {
+  const m = pyInput().manifest;
+  assert.ok(startCommand(m).includes('export DATA_DIR="$(pwd)/data"') && !startCommand(m).includes("bridge.py"));
+  const w = startCommand(m, { port: 8080, path: "/hook" });
+  assert.ok(w.includes("python3 ../bridge.py & exec .venv/bin/python -u main.py") && w.includes("export PORT=8080 WEBHOOK_PATH='/hook'"));
+  assert.throws(() => startCommand(m, { port: 80, path: "/x" }));
+  assert.throws(() => startCommand(m, { port: 8080, path: "/x; rm -rf /" }));
+});
+test("webhook deploy uploads bridge.py and requires python3", async () => {
+  const rt = new FakeRuntime(); const { h } = hooks();
+  await runDeployment(rt, { ...pyInput(), webhook: { port: 8080, path: "/" } }, h);
+  assert.ok(rt.uploads.some((u) => u.path === "bridge.py"));
+  const rt2 = new FakeRuntime(); rt2.missingTools.add("python3");
+  const node = detectProject(files({ "package.json": "{}", "index.js": "" }));
+  await assert.rejects(runDeployment(rt2, { ...pyInput(), manifest: node, webhook: { port: 8080, path: "/" } }, h), (e: any) => e.stage === "checking" && /python3/.test(e.message));
+});
+test("checkRuntimeTools parses the tool report", async () => {
+  const rt = new FakeRuntime(); const id = (await rt.create({ plan: "x", networkPolicy: { type: "deny-all" } })).id;
+  const t = await checkRuntimeTools(rt, id);
+  assert.equal(t.python3.found, true); assert.match(t.python3.version, /Python 3/); assert.equal(t.node.found, false); assert.equal(t.venv.found, true);
+});
+
+const hasPython = spawnSync("python3", ["--version"]).status === 0;
+test("webhook bridge forwards Telegram updates to the local bot server (real Python process, mock Telegram)", { skip: hasPython ? false : "python3 not available", timeout: 30_000 }, async () => {
+  const updates = [{ update_id: 10, message: { text: "a" } }, { update_id: 11, message: { text: "b" } }];
+  const calls: string[] = []; const got: { url: string; secret: string | undefined; body: any }[] = [];
+  const tg = createServer((req, res) => {
+    let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => {
+      calls.push(String(req.url));
+      if (String(req.url).endsWith("/deleteWebhook")) return void res.end(JSON.stringify({ ok: true, result: true }));
+      const off = Number(new URLSearchParams(b).get("offset") ?? 0);
+      const result = updates.filter((u) => u.update_id >= off);
+      setTimeout(() => res.end(JSON.stringify({ ok: true, result })), result.length ? 0 : 400);
+    });
+  });
+  let botFailOnce = true;
+  const bot = createServer((req, res) => {
+    let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => { got.push({ url: String(req.url), secret: req.headers["x-telegram-bot-api-secret-token"] as string, body: JSON.parse(b) }); res.end("ok"); });
+  });
+  await new Promise<void>((r) => tg.listen(0, "127.0.0.1", r)); await new Promise<void>((r) => bot.listen(0, "127.0.0.1", r));
+  const dir = mkdtempSync(join(tmpdir(), "bridge-")); const file = join(dir, "bridge.py"); writeFileSync(file, BRIDGE_PY);
+  const p = spawn("python3", [file], { env: { ...process.env, BOT_TOKEN: "123:SECRETTOKEN", PORT: String((bot.address() as any).port), WEBHOOK_PATH: "/hook", TELEGRAM_WEBHOOK_SECRET: "s3cret", TELEGRAM_API_BASE: `http://127.0.0.1:${(tg.address() as any).port}` } });
+  let log = ""; p.stdout.on("data", (d) => (log += d)); p.stderr.on("data", (d) => (log += d));
+  try {
+    for (let i = 0; i < 100 && got.length < 2; i++) await new Promise((r) => setTimeout(r, 100));
+    assert.deepEqual(got.map((g) => g.body.update_id), [10, 11], "each update delivered exactly once, in order");
+    assert.ok(got.every((g) => g.url === "/hook" && g.secret === "s3cret"));
+    assert.ok(calls.some((c) => c.endsWith("/deleteWebhook")), "removes any existing webhook first");
+    assert.ok(!log.includes("SECRETTOKEN"), "token never appears in bridge logs");
+    void botFailOnce;
+  } finally { p.kill("SIGKILL"); tg.close(); bot.close(); }
 });

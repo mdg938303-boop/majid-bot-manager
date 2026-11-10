@@ -8,6 +8,10 @@ export class FakeRuntime implements Runtime {
   crashOnStart = false;
   stubborn = false;
   runtimeOk = true;
+  hasDataDir = true; dataFiles = 3; dataKb = 12; tarBytes = Buffer.from("FAKE-TAR-BYTES"); tarFails = false;
+  toolOutput = "python3|yes|Python 3.12.1\npip|yes|pip 24.0\nnode|no|\nnpm|no|\nphp|no|\ncomposer|no|\nvenv|yes|\n";
+  downloads: string[] = [];
+  async download(id: string, path: string) { const sb = this.sandboxes.get(id); if (!sb || sb.terminated) throw new Error("sandbox ended"); this.downloads.push(path); return this.tarBytes; }
   private n = 0;
   async available() { return this.runtimeOk ? { ok: true } : { ok: false, reason: "Sandboxes are not enabled for this workspace." }; }
   async create(opts: CreateOptions) {
@@ -20,6 +24,11 @@ export class FakeRuntime implements Runtime {
     if (!sb || sb.terminated) throw new Error("sandbox ended");
     this.commands.push(command);
     const ok = (stdout = ""): ExecResult => ({ exitCode: 0, stdout, stderr: "" });
+    if (command.startsWith("for t in")) return ok(this.toolOutput);
+    if (command.startsWith("test -d app/data")) return ok(this.hasDataDir ? "yes\n" : "no\n");
+    if (command.startsWith("find app/data")) return ok(`${this.dataFiles}\n`);
+    if (command.startsWith("du -sk")) return ok(`${this.dataKb}\n`);
+    if (command.startsWith("tar cf data.tar")) return this.tarFails ? { exitCode: 2, stdout: "", stderr: "tar: not found" } : ok();
     let m: RegExpMatchArray | null;
     if ((m = command.match(/command -v (\S+)/)) && !command.includes("setsid")) return this.missingTools.has(m[1]) ? { exitCode: 1, stdout: "", stderr: "" } : ok("ok\n");
     if (command.includes("kill -0")) return ok(sb.alive ? "RUNNING\n" : "STOPPED\n");
@@ -34,7 +43,8 @@ export class FakeRuntime implements Runtime {
     }
     return ok();
   }
-  async upload(id: string, path: string, data: Buffer) { const sb = this.sandboxes.get(id)!; if (path === ".bot.env") sb.env = data; else sb.files.set(path, data); }
+  uploads: { path: string; kind: string }[] = [];
+  async upload(id: string, path: string, data: Buffer, kind?: string) { const sb = this.sandboxes.get(id)!; this.uploads.push({ path, kind: kind ?? "file" }); if (path === ".bot.env") sb.env = data; else sb.files.set(path + (path === "app" && sb.files.has("app") ? "#data" : ""), data); }
   async status(id: string) { const s = this.sandboxes.get(id); return !s ? "unknown" : s.terminated ? "terminated" : "running"; }
   async terminate(id: string) { const s = this.sandboxes.get(id); if (s) { s.terminated = true; s.alive = false; } }
 }

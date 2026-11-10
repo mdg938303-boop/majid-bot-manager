@@ -80,3 +80,10 @@ Blueprint Apply করলে বিল্ড শুরু হয় (৫–১�
 
 ## ১২. GitHub থেকে আপডেট
 Termux-এ পরিবর্তন করে `git add . && git commit -m "update" && git push`। `autoDeploy: false` থাকায় Render → Service → **Manual Deploy → Deploy latest commit** চাপুন।
+
+## নতুন সুবিধা (আপডেটের পর)
+- **ভাষা:** মেনুর "English / বাংলা" বোতামে ভাষা বদলানো যায়।
+- **Runtime check:** Admin → Overview → "পরীক্ষা চালান" চাপলে দেখা যাবে Sandbox-এ Python, Node.js, PHP আছে কি না।
+- **বটের ডেটা:** বটের কোডে `DATA_DIR` ফোল্ডারে ফাইল লিখলে (সর্বোচ্চ ১০ MB) সেটা বন্ধ/Redeploy-এর সময় ও প্রতি ১০ মিনিটে সংরক্ষিত হয়ে পরের ডিপ্লয়ে ফিরে আসে। বটের Settings-এ দেখা ও ডাউনলোড করা যায়।
+- **Webhook মোড:** বটের Settings → Webhook মোড চালু করে পোর্ট দিন, তারপর Redeploy করুন।
+- **ডেভেলপারের জন্য:** `docs/DEVELOPER_BRIEF.md` ফাইলটি তাকে পাঠিয়ে দিন।

@@ -55,6 +55,11 @@ export class RenderRuntime implements Runtime {
     await this.sandboxes.upload(id, path, data, undefined, { contentType: kind === "tar" ? "application/x-tar" : "application/octet-stream" });
   }
 
+  async download(id: string, path: string, maxBytes: number) {
+    const d = await this.sandboxes.download(id, path, undefined, { maxSizeBytes: maxBytes });
+    return Buffer.from(d.data);
+  }
+
   async status(id: string) {
     try { return (await this.sandboxes.get(id)).status as string; } catch { return "unknown"; }
   }
@@ -71,6 +76,7 @@ export class DisabledRuntime implements Runtime {
   async create(_o: CreateOptions): Promise<{ id: string }> { return this.fail(); }
   async exec(): Promise<ExecResult> { return this.fail(); }
   async upload(): Promise<void> { return this.fail(); }
+  async download(): Promise<Buffer> { return this.fail(); }
   async status() { return "unknown"; }
   async terminate() { /* nothing to terminate */ }
 }

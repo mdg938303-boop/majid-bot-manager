@@ -12,7 +12,7 @@ import { h, str } from "./util.js";
 
 const publicBot = (b: any) => ({
   id: b.id, name: b.name, ownerId: b.owner_id, ownerEmail: b.owner_email, telegramUsername: b.telegram_username, language: b.language, entryPoint: b.entry_point,
-  plan: b.plan, status: b.status, sandboxId: b.sandbox_id, egressDomains: b.egress_domains, warnings: b.manifest?.warnings ?? [],
+  plan: b.plan, webhookPort: b.webhook_port, webhookPath: b.webhook_path, status: b.status, sandboxId: b.sandbox_id, egressDomains: b.egress_domains, warnings: b.manifest?.warnings ?? [],
   lastDeployedAt: b.last_deployed_at, createdAt: b.created_at, fileCount: b.file_count ?? 0,
 });
 
@@ -57,6 +57,12 @@ export function botRoutes(cfg: Config, engine: Engine) {
       const plan = str(req.body.plan, "Plan", { max: 20 });
       if (!(await getSetting<string[]>("allowed_plans", ["1c-2g"])).includes(plan)) throw new HttpError(400, "That plan is not allowed by the admin.");
       await q("UPDATE bots SET plan=$2 WHERE id=$1", [bot.id, plan]);
+    }
+    if (req.body?.webhookPort !== undefined) {
+      const port = req.body.webhookPort;
+      if (port !== null && !(Number.isInteger(port) && port >= 1024 && port <= 65535)) throw new HttpError(400, "Port must be between 1024 and 65535.");
+      const path = req.body.webhookPath === undefined ? "/" : str(req.body.webhookPath, "Webhook path", { max: 100, re: /^\/[A-Za-z0-9_\-./]*$/ });
+      await q("UPDATE bots SET webhook_port=$2, webhook_path=$3 WHERE id=$1", [bot.id, port, path]);
     }
     if (req.body?.egressDomains !== undefined) {
       const arr = Array.isArray(req.body.egressDomains) ? req.body.egressDomains : [];
@@ -120,6 +126,32 @@ export function botRoutes(cfg: Config, engine: Engine) {
     const sandbox = await engine.runtime.status(bot.sandbox_id);
     const proc = sandbox === "running" ? await processState(engine.runtime, bot.sandbox_id).catch(() => "unknown") : null;
     res.json({ dbStatus: bot.status, sandbox, process: proc });
+  }));
+
+  // ---- persistent data folder ----
+  r.get("/:id/data", h(async (req, res) => {
+    const bot = await loadBotFor(req, res, false); if (!bot) return;
+    const d = await q("SELECT size, saved_at FROM bot_data WHERE bot_id=$1", [bot.id]);
+    res.json({ saved: !!d.rowCount, size: d.rows[0]?.size ?? 0, savedAt: d.rows[0]?.saved_at ?? null, limitMb: 10 });
+  }));
+  r.post("/:id/data/save", h(async (req, res) => {
+    const bot = await loadBotFor(req, res); if (!bot) return;
+    const result = await engine.saveData(bot);
+    await audit(req, "bot.data_save", { type: "bot", id: bot.id }, { result });
+    res.json({ result });
+  }));
+  r.get("/:id/data/download", h(async (req, res) => {
+    const bot = await loadBotFor(req, res, false); if (!bot) return;
+    const d = await q("SELECT archive FROM bot_data WHERE bot_id=$1", [bot.id]);
+    if (!d.rowCount) throw new HttpError(404, "No saved data yet.");
+    res.setHeader("Content-Type", "application/gzip");
+    res.setHeader("Content-Disposition", `attachment; filename="${String(bot.name).replace(/[^\w.\-]/g, "_")}-data.tar.gz"`);
+    res.send(d.rows[0].archive);
+  }));
+  r.delete("/:id/data", h(async (req, res) => {
+    const bot = await loadBotFor(req, res); if (!bot) return;
+    await q("DELETE FROM bot_data WHERE bot_id=$1", [bot.id]);
+    await audit(req, "bot.data_delete", { type: "bot", id: bot.id }); res.json({ ok: true });
   }));
 
   // ---- change the Telegram token of an existing bot (works while running) ----

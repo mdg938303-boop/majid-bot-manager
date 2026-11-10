@@ -3,13 +3,15 @@ import type { Config } from "../config.js";
 import { decrypt } from "../lib/crypto.js";
 import { detectProject, DetectionError, type Manifest } from "../lib/detect.js";
 import type { Runtime } from "../sandbox/runtime.js";
-import { DeployError, processState, readLogChunk, runDeployment, startProcess, stopProcess, type LogStream } from "./deployer.js";
+import { gunzipSync } from "node:zlib";
+import { checkRuntimeTools, DeployError, exportData, MAX_DATA_BYTES, processState, readLogChunk, runDeployment, startProcess, stopProcess, type LogStream, type WebhookCfg } from "./deployer.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 type Bot = Record<string, any>;
 
 export class Engine {
   private busy = false;
+  private lastDataSave = new Map<string, number>();
   private timers: NodeJS.Timeout[] = [];
   constructor(private cfg: Config, public runtime: Runtime) {}
 
@@ -92,7 +94,9 @@ export class Engine {
       const env: Record<string, string> = {};
       for (const r of envRows.rows) env[r.key] = decrypt(r.value_enc, this.cfg.encryptionKey);
 
+      if (bot.sandbox_id) await this.saveData(bot, true); // keep the data folder before the old sandbox is replaced
       const res = await runDeployment(this.runtime, {
+        webhook: this.webhookOf(bot), dataArchive: await this.loadDataArchive(bot.id),
         botToken: decrypt(bot.token_enc, this.cfg.encryptionKey), env, files, manifest, plan: bot.plan,
         egress: bot.egress_domains ?? [], groupId: this.cfg.sandboxGroupId, previousSandboxId: bot.sandbox_id,
       }, {
@@ -113,6 +117,50 @@ export class Engine {
     }
   }
 
+  // ---------- persistent bot data ----------
+  private webhookOf(bot: Bot): WebhookCfg | null {
+    return bot.webhook_port ? { port: Number(bot.webhook_port), path: bot.webhook_path || "/" } : null;
+  }
+
+  /** Copies the bot's data/ folder from the sandbox into Postgres. Best effort; never throws. */
+  async saveData(bot: Bot, quiet = false): Promise<"saved" | "unchanged" | "none" | "too_large" | "error" | "no_sandbox"> {
+    if (!bot.sandbox_id) return "no_sandbox";
+    const r = await exportData(this.runtime, bot.sandbox_id);
+    if (r.status === "saved") {
+      const prev = await q("SELECT sha FROM bot_data WHERE bot_id=$1", [bot.id]);
+      if (prev.rows[0]?.sha === r.sha) return "unchanged";
+      await q("INSERT INTO bot_data(bot_id,archive,size,sha,saved_at) VALUES ($1,$2,$3,$4,now()) ON CONFLICT (bot_id) DO UPDATE SET archive=$2,size=$3,sha=$4,saved_at=now()", [bot.id, r.gz, r.gz.length, r.sha]);
+      if (!quiet) await this.log(bot.id, bot.current_deployment_id, "system", `Bot data saved (${Math.ceil(r.gz.length / 1024)} KB compressed).\n`);
+      return "saved";
+    }
+    if (r.status === "too_large") await this.log(bot.id, bot.current_deployment_id, "system", `⚠ The data folder is ${Math.round(r.kb / 1024)} MB; only ${MAX_DATA_BYTES / 1048576} MB can be saved, so it was NOT saved.\n`);
+    else if (r.status === "error" && !quiet) await this.log(bot.id, bot.current_deployment_id, "system", `⚠ Could not save bot data: ${r.message}\n`);
+    return r.status;
+  }
+
+  private async loadDataArchive(botId: string): Promise<Buffer | null> {
+    const r = await q("SELECT archive FROM bot_data WHERE bot_id=$1", [botId]);
+    if (!r.rowCount) return null;
+    try { return gunzipSync(r.rows[0].archive); } catch { return null; }
+  }
+
+  // ---------- runtime tool check (admin) ----------
+  async runtimeCheck() {
+    if (await getSetting("kill_switch", false)) throw new HttpError(423, "The admin kill switch is active.");
+    let id: string | null = null;
+    try {
+      id = (await this.runtime.create({ plan: "1c-2g", networkPolicy: { type: "deny-all" }, groupId: this.cfg.sandboxGroupId })).id;
+      const tools = await checkRuntimeTools(this.runtime, id);
+      const result = { at: new Date().toISOString(), tools };
+      await setSetting("runtime_check", result);
+      return result;
+    } catch (e: any) {
+      throw new HttpError(502, `Runtime check failed: ${e?.message ?? e}. If another sandbox is running, Render's own concurrency limit may be blocking a second one; stop the bot and try again.`);
+    } finally {
+      if (id) await this.runtime.terminate(id).catch(() => undefined);
+    }
+  }
+
   // ---------- controls ----------
   private async requireSandbox(bot: Bot) {
     if (!bot.sandbox_id) return false;
@@ -126,7 +174,7 @@ export class Engine {
     if ((await processState(this.runtime, bot.sandbox_id)) === "running") { await q("UPDATE bots SET status='running', stopped_at=NULL WHERE id=$1", [bot.id]); return { queued: false, status: "running" }; }
     const m = bot.manifest as Manifest;
     await this.pushEnv(bot); // apply the latest token / env variables before launching
-    await startProcess(this.runtime, bot.sandbox_id, m, { log: (s, t) => this.log(bot.id, bot.current_deployment_id, s, t), stage: () => undefined, sandboxCreated: () => undefined });
+    await startProcess(this.runtime, bot.sandbox_id, m, { log: (s, t) => this.log(bot.id, bot.current_deployment_id, s, t), stage: () => undefined, sandboxCreated: () => undefined }, 4000, this.webhookOf(bot));
     await q("UPDATE bots SET status='running', stopped_at=NULL, updated_at=now() WHERE id=$1", [bot.id]);
     return { queued: false, status: "running" };
   }
@@ -136,6 +184,7 @@ export class Engine {
       await stopProcess(this.runtime, bot.sandbox_id);
       await this.collectOne(bot).catch(() => undefined);
       if ((await processState(this.runtime, bot.sandbox_id)) !== "stopped") throw new HttpError(500, "Process is still running.");
+      await this.saveData(bot);
     }
     await q("UPDATE bots SET status='stopped', stopped_at=now(), updated_at=now() WHERE id=$1", [bot.id]);
     await this.log(bot.id, bot.current_deployment_id, "system", "Bot stopped (process verified stopped).\n");
@@ -159,8 +208,9 @@ export class Engine {
     await this.runtime.exec(bot.sandbox_id, "chmod 600 .bot.env");
   }
 
-  async release(bot: Bot, reason = "Released to save credit.") {
+  async release(bot: Bot, reason = "Released to save credit.", saveFirst = true) {
     if (bot.sandbox_id) {
+      if (saveFirst) await this.saveData(bot, true);
       await this.runtime.terminate(bot.sandbox_id).catch((e) => console.warn("terminate failed", e?.message));
       await q("UPDATE sandbox_instances SET terminated_at=now() WHERE sandbox_id=$1", [bot.sandbox_id]);
     }
@@ -178,7 +228,7 @@ export class Engine {
     await q("UPDATE deployments SET status='cancelled', finished_at=now(), error='Kill switch' WHERE status='queued'");
     const bots = await q("SELECT * FROM bots WHERE sandbox_id IS NOT NULL");
     let n = 0;
-    for (const b of bots.rows) { await this.release(b, "Admin kill switch."); n++; }
+    for (const b of bots.rows) { await this.release(b, "Admin kill switch.", false); n++; }
     return n;
   }
 
@@ -208,6 +258,7 @@ export class Engine {
             await q("UPDATE bots SET status='failed', updated_at=now() WHERE id=$1", [bot.id]);
             await this.log(bot.id, bot.current_deployment_id, "system", "Bot process exited unexpectedly. Check stderr above.\n");
           }
+          if (Date.now() - (this.lastDataSave.get(bot.id) ?? 0) > 10 * 60_000) { this.lastDataSave.set(bot.id, Date.now()); await this.saveData(bot, true); }
           await q("DELETE FROM logs WHERE bot_id=$1 AND id < COALESCE((SELECT id FROM logs WHERE bot_id=$1 ORDER BY id DESC OFFSET 20000 LIMIT 1),0)", [bot.id]);
         } catch (e: any) { console.warn(`log poll failed for ${bot.id}:`, e?.message); }
         await sleep(100);

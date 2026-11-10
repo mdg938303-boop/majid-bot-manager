@@ -97,6 +97,10 @@ export function adminRoutes(cfg: Config, engine: Engine) {
     await audit(req, "settings.update", { type: "setting", id: key }, { value: req.body.value }); res.json({ ok: true });
   }));
 
+  r.post("/runtime-check", requirePermission("settings.manage"), h(async (req, res) => {
+    const result = await engine.runtimeCheck(); await audit(req, "runtime.check", undefined, { tools: Object.keys(result.tools).filter((t) => result.tools[t].found) });
+    res.json(result);
+  }));
   r.post("/killswitch", requirePermission("killswitch.use"), h(async (req, res) => {
     const n = await engine.killAll(); await audit(req, "killswitch.on", undefined, { terminated: n });
     res.json({ terminated: n, killSwitch: true });
@@ -113,7 +117,7 @@ export function adminRoutes(cfg: Config, engine: Engine) {
     const inst = await q("SELECT plan, sum(extract(epoch FROM (COALESCE(terminated_at, now()) - created_at)))/3600 AS hours FROM sandbox_instances WHERE created_at > date_trunc('month', now()) GROUP BY plan");
     let est = 0; for (const x of inst.rows) est += Number(x.hours) * ((MEM_USD_PER_HR[x.plan] ?? 0.038) + 0.1 * CPU_USD_PER_ACTIVE_HR * Number(String(x.plan).split("c")[0]));
     const warn = await getSetting<number>("budget_warning_usd", 40);
-    res.json({ runtime, counts, killSwitch: await getSetting("kill_switch", false),
+    res.json({ runtime, counts, runtimeCheck: await getSetting("runtime_check", null), killSwitch: await getSetting("kill_switch", false),
       costEstimate: { monthToDateUsd: Math.round(est * 100) / 100, warnAtUsd: warn, overWarning: est >= warn,
         disclaimer: "Estimate from sandbox uptime in this platform's records, assuming ~10% active CPU and rates seen on Render's pricing page. It is NOT your Render bill and does not show remaining credit — check Dashboard → Billing." } });
   }));
